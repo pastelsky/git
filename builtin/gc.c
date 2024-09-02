@@ -17,6 +17,7 @@
 #include "hex.h"
 #include "repository.h"
 #include "config.h"
+#include "string-list.h"
 #include "tempfile.h"
 #include "lockfile.h"
 #include "parse-options.h"
@@ -246,6 +247,7 @@ struct maintenance_run_opts {
 	int quiet;
 	enum schedule_priority schedule;
 };
+
 #define MAINTENANCE_RUN_OPTS_INIT { \
 	.detach = -1, \
 }
@@ -880,6 +882,22 @@ out:
 	return 0;
 }
 
+struct maintenance_config {
+	struct prefetch_config_list {
+		struct prefetch_config {
+			char *remote;
+			struct string_list refs;
+		} *items;
+		int nr, alloc;
+	} prefetch;
+};
+
+#define MAINTENANCE_CONFIG_INIT { \
+	.prefetch = { NULL, 0, 0 }, \
+}
+
+static struct maintenance_config maintenance_cfg = MAINTENANCE_CONFIG_INIT;
+
 static const char *const builtin_maintenance_run_usage[] = {
 	N_("git maintenance run [--auto] [--[no-]quiet] [--task=<task>] [--schedule]"),
 	NULL
@@ -1023,20 +1041,91 @@ static int fetch_remote(struct remote *remote, void *cbdata)
 {
 	struct maintenance_run_opts *opts = cbdata;
 	struct child_process child = CHILD_PROCESS_INIT;
+	struct prefetch_config *prefetch_cfg = NULL;
+	static int has_prefetch_cfg = -1; // -1: unknown, 0: no config, 1: config exists
 
 	if (remote->skip_default_update)
 		return 0;
 
+	if (has_prefetch_cfg == -1)
+		has_prefetch_cfg = (maintenance_cfg.prefetch.nr > 0);
+
+	if (has_prefetch_cfg) {
+		for (int i = 0; i < maintenance_cfg.prefetch.nr; i++) {
+			if (!strcmp(remote->name, maintenance_cfg.prefetch.items[i].remote)) {
+				prefetch_cfg = &maintenance_cfg.prefetch.items[i];
+				break;
+			}
+		}
+
+		if (!prefetch_cfg)
+			return 0;
+	}
+
 	child.git_cmd = 1;
-	strvec_pushl(&child.args, "fetch", remote->name,
-		     "--prefetch", "--prune", "--no-tags",
-		     "--no-write-fetch-head", "--recurse-submodules=no",
-		     NULL);
+	strvec_pushl(&child.args, "fetch", remote->name, "--prefetch", "--prune", "--no-tags",
+		 "--no-write-fetch-head", "--recurse-submodules=no", NULL);
 
 	if (opts->quiet)
 		strvec_push(&child.args, "--quiet");
 
+	if (prefetch_cfg && prefetch_cfg->refs.nr > 0) {
+		struct string_list_item *item;
+		for_each_string_list_item(item, &prefetch_cfg->refs)
+		    strvec_pushf(&child.args, "%s:%s", item->string, item->string);
+	}
+
 	return !!run_command(&child);
+}
+
+static int maintenance_config_callback(const char *key, const char *value,
+				       const struct config_context *ctx,
+				       void *data)
+{
+	struct maintenance_config *config = data;
+	const char *remote_name;
+	const char *refs_key;
+	struct prefetch_config *pc;
+	struct strbuf name = STRBUF_INIT;
+
+	if (!skip_prefix(key, "maintenance.prefetch.", &remote_name))
+		return 0;
+
+	refs_key = strrchr(remote_name, '.');
+	if (!refs_key || strcmp(refs_key + 1, "refs"))
+		return 0;
+
+	strbuf_add(&name, remote_name, refs_key - remote_name);
+
+	REALLOC_ARRAY(config->prefetch.items, config->prefetch.nr + 1);
+	pc = &config->prefetch.items[config->prefetch.nr++];
+	pc->remote = strbuf_detach(&name, NULL);
+	string_list_init_dup(&pc->refs);
+	pc->refs.strdup_strings = 1;
+	string_list_split(&pc->refs, value, ' ', -1);
+
+	return 0;
+}
+
+static void maintenance_config_read(struct maintenance_config *config)
+{
+	git_config(maintenance_config_callback, config);
+}
+
+static void maintenance_config_release(struct maintenance_config *config)
+{
+	int i;
+
+	if (!config->prefetch.items)
+		return;
+
+	for (i = 0; i < config->prefetch.nr; i++) {
+		free(config->prefetch.items[i].remote);
+		string_list_clear(&config->prefetch.items[i].refs, 1);
+	}
+
+	free(config->prefetch.items);
+	memset(config, 0, sizeof(*config));
 }
 
 static int maintenance_task_prefetch(struct maintenance_run_opts *opts,
@@ -1563,7 +1652,7 @@ static int maintenance_run(int argc, const char **argv, const char *prefix)
 {
 	int i;
 	struct maintenance_run_opts opts = MAINTENANCE_RUN_OPTS_INIT;
-	struct gc_config cfg = GC_CONFIG_INIT;
+	struct gc_config gc_cfg = GC_CONFIG_INIT;
 	struct option builtin_maintenance_run_options[] = {
 		OPT_BOOL(0, "auto", &opts.auto_flag,
 			 N_("run tasks based on the state of the repository")),
@@ -1579,7 +1668,10 @@ static int maintenance_run(int argc, const char **argv, const char *prefix)
 			PARSE_OPT_NONEG, task_option_parse),
 		OPT_END()
 	};
+
 	int ret;
+
+	maintenance_config_read(&maintenance_cfg);
 
 	opts.quiet = !isatty(2);
 
@@ -1591,18 +1683,22 @@ static int maintenance_run(int argc, const char **argv, const char *prefix)
 			     builtin_maintenance_run_usage,
 			     PARSE_OPT_STOP_AT_NON_OPTION);
 
+
+	maintenance_config_read(&maintenance_cfg);
+
 	if (opts.auto_flag && opts.schedule)
 		die(_("use at most one of --auto and --schedule=<frequency>"));
 
-	gc_config(&cfg);
+	gc_config(&gc_cfg);
 	initialize_task_config(opts.schedule);
 
 	if (argc != 0)
 		usage_with_options(builtin_maintenance_run_usage,
 				   builtin_maintenance_run_options);
 
-	ret = maintenance_run_tasks(&opts, &cfg);
-	gc_config_release(&cfg);
+	ret = maintenance_run_tasks(&opts, &gc_cfg);
+	gc_config_release(&gc_cfg);
+	maintenance_config_release(&maintenance_cfg);
 	return ret;
 }
 

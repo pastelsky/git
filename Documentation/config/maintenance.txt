@@ -69,3 +69,21 @@ maintenance.incremental-repack.auto::
 	Otherwise, a positive value implies the command should run when the
 	number of pack-files not in the multi-pack-index is at least the value
 	of `maintenance.incremental-repack.auto`. The default value is 10.
+
+maintenance.prefetch.<remote>.refs::
+	This multi-valued config option specifies which refs to prefetch
+	for each remote during the prefetch maintenance task. Each value
+	of this option is a refspec source that will be used when fetching from
+	the specified remote. This is useful for large active repositories where
+	fetching all refs and remotes might not be very efficient.
++
+For example, to prefetch only the master branch from the origin remote,
+and all branches from the upstream remote, you would use:
++
+----
+$ git config maintenance.prefetch.origin.refs refs/heads/master
+$ git config maintenance.prefetch.upstream.refs refs/heads/*
+----
++
+If this option is not set for a remote, the prefetch task will use
+the default behavior of fetching all refs from all remotes.

@@ -215,22 +215,31 @@ test_expect_success 'run --task=prefetch with no remotes' '
 '
 
 test_expect_success 'prefetch multiple remotes' '
-	git clone . clone1 &&
-	git clone . clone2 &&
+	rm -fr maintenance_repo &&
+	test_create_repo maintenance_repo &&
+	cd maintenance_repo &&
+
+	git init clone1 &&
+	git init clone2 &&
+
 	git remote add remote1 "file://$(pwd)/clone1" &&
 	git remote add remote2 "file://$(pwd)/clone2" &&
+
 	git -C clone1 switch -c one &&
 	git -C clone2 switch -c two &&
 	test_commit -C clone1 one &&
 	test_commit -C clone2 two &&
+
 	GIT_TRACE2_EVENT="$(pwd)/run-prefetch.txt" git maintenance run --task=prefetch 2>/dev/null &&
 	fetchargs="--prefetch --prune --no-tags --no-write-fetch-head --recurse-submodules=no --quiet" &&
 	test_subcommand git fetch remote1 $fetchargs <run-prefetch.txt &&
 	test_subcommand git fetch remote2 $fetchargs <run-prefetch.txt &&
+
 	git for-each-ref refs/remotes >actual &&
 	test_must_be_empty actual &&
 	git log prefetch/remotes/remote1/one &&
 	git log prefetch/remotes/remote2/two &&
+
 	git fetch --all &&
 	test_cmp_rev refs/remotes/remote1/one refs/prefetch/remotes/remote1/one &&
 	test_cmp_rev refs/remotes/remote2/two refs/prefetch/remotes/remote2/two &&
@@ -245,43 +254,66 @@ test_expect_success 'prefetch multiple remotes' '
 	test_subcommand git fetch remote2 $fetchargs <skip-remote1.txt
 '
 
-test_expect_success 'loose-objects task' '
-	# Repack everything so we know the state of the object dir
-	git repack -adk &&
+test_expect_success 'prefetch with default behavior (all remotes)' '
+	rm -fr maintenance_repo &&
+	test_create_repo maintenance_repo &&
+	cd maintenance_repo &&
 
-	# Hack to stop maintenance from running during "git commit"
-	echo in use >.git/objects/maintenance.lock &&
+	git init clone1 &&
+	git init clone2 &&
+	git remote add remote1 "file://$(pwd)/clone1" &&
+	git remote add remote2 "file://$(pwd)/clone2" &&
 
-	# Assuming that "git commit" creates at least one loose object
-	test_commit create-loose-object &&
-	rm .git/objects/maintenance.lock &&
+	git -C clone1 switch -c one &&
+	git -C clone2 switch -c two &&
+	test_commit -C clone1 one &&
+	test_commit -C clone2 two &&
 
-	ls .git/objects >obj-dir-before &&
-	test_file_not_empty obj-dir-before &&
-	ls .git/objects/pack/*.pack >packs-before &&
-	test_line_count = 1 packs-before &&
+	GIT_TRACE2_EVENT="$(pwd)/run-prefetch-default.txt" \
+		git maintenance run --task=prefetch 2>/dev/null &&
 
-	# The first run creates a pack-file
-	# but does not delete loose objects.
-	git maintenance run --task=loose-objects &&
-	ls .git/objects >obj-dir-between &&
-	test_cmp obj-dir-before obj-dir-between &&
-	ls .git/objects/pack/*.pack >packs-between &&
-	test_line_count = 2 packs-between &&
-	ls .git/objects/pack/loose-*.pack >loose-packs &&
-	test_line_count = 1 loose-packs &&
+	fetchargs="--prefetch --prune --no-tags --no-write-fetch-head --recurse-submodules=no --quiet" &&
+	test_subcommand git fetch remote1 $fetchargs <run-prefetch-default.txt &&
+	test_subcommand git fetch remote2 $fetchargs <run-prefetch-default.txt &&
 
-	# The second run deletes loose objects
-	# but does not create a pack-file.
-	git maintenance run --task=loose-objects &&
-	ls .git/objects >obj-dir-after &&
-	cat >expect <<-\EOF &&
-	info
-	pack
-	EOF
-	test_cmp expect obj-dir-after &&
-	ls .git/objects/pack/*.pack >packs-after &&
-	test_cmp packs-between packs-after
+	git for-each-ref refs/remotes >actual &&
+	test_must_be_empty actual &&
+	git log prefetch/remotes/remote1/one &&
+	git log prefetch/remotes/remote2/two &&
+
+	git fetch --all &&
+	test_cmp_rev refs/remotes/remote1/one refs/prefetch/remotes/remote1/one &&
+	test_cmp_rev refs/remotes/remote2/two refs/prefetch/remotes/remote2/two
+'
+
+test_expect_success 'prefetch with configurable remotes' '
+	rm -fr maintenance_repo &&
+	test_create_repo maintenance_repo &&
+	cd maintenance_repo &&
+
+	git init clone1 &&
+	git init clone2 &&
+
+	git remote add remote1 "file://$(pwd)/clone1" &&
+	git remote add remote2 "file://$(pwd)/clone2" &&
+	git -C clone1 switch -c one &&
+	git -C clone2 switch -c two &&
+	test_commit -C clone1 one &&
+	test_commit -C clone2 two &&
+
+	git config maintenance.prefetch.remote1.refs "refs/heads/one" &&
+
+	GIT_TRACE2_EVENT="$(pwd)/run-prefetch-config.txt" \
+		git maintenance run --task=prefetch 2>/dev/null &&
+
+	fetchargs="--prefetch --prune --no-tags --no-write-fetch-head --recurse-submodules=no --quiet" &&
+	test_subcommand git fetch remote1 $fetchargs refs/heads/one:refs/heads/one <run-prefetch-config.txt &&
+	test_subcommand ! git fetch remote2 $fetchargs <run-prefetch-config.txt &&
+
+	git for-each-ref refs/remotes >actual &&
+	test_must_be_empty actual &&
+	git log prefetch/remotes/remote1/one &&
+	test_must_fail git log prefetch/remotes/remote2/two
 '
 
 test_expect_success 'maintenance.loose-objects.auto' '
