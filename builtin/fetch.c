@@ -434,6 +434,40 @@ static void find_non_local_tags(const struct ref *refs,
 	oidset_clear(&fetch_oids);
 }
 
+static struct refspec get_prefetch_refspec(struct remote *remote) {
+	if (remote->prefetch_refs && remote->prefetch_refs.nr > 0) {
+		struct refspec rs = REFSPEC_INIT_FETCH;
+		int i;
+		// Clear existing refspecs
+		for (i = 0; i < rs.nr; i++) {
+			free(rs.items[i].src);
+			free(rs.items[i].dst);
+		}
+		rs.nr = 0;
+
+		// Add prefetch refs
+		for (i = 0; i < remote->prefetch_refs.nr; i++) {
+			const char *src = remote->prefetch_refs.items[i].string;
+			struct strbuf dst = STRBUF_INIT;
+
+			strbuf_addf(&dst, "refs/remotes/%s/", remote->name);
+			if (starts_with(src, "refs/heads/"))
+				strbuf_addstr(&dst, src + 11);
+			else if (starts_with(src, "refs/"))
+				strbuf_addstr(&dst, src + 5);
+			else
+				strbuf_addstr(&dst, src);
+
+			refspec_appendf(&rs, "%s:%s", src, dst.buf);
+			strbuf_release(&dst);
+		}
+		return rs;
+	} else {
+		return remote->fetch;
+	}
+
+}
+
 static void filter_prefetch_refspec(struct refspec *rs)
 {
 	int i;
@@ -502,8 +536,10 @@ static struct ref *get_ref_map(struct remote *remote,
 	int existing_refs_populated = 0;
 
 	filter_prefetch_refspec(rs);
-	if (remote)
-		filter_prefetch_refspec(&remote->fetch);
+	if (remote) {
+		struct refspec prefetch_rs = get_prefetch_refspec(remote);
+		filter_prefetch_refspec(&prefetch_rs);
+	}
 
 	if (rs->nr) {
 		struct refspec *fetch_refspec;
